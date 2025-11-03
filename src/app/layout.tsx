@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import localFont from "next/font/local";
+import Script from "next/script";
 
 const AVEstianaFont = localFont({
   src: "../../public/fonts/AVEstiana-Regular.otf",
@@ -109,6 +110,11 @@ export default function RootLayout({
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
         />
         {children}
+        <Script
+        src={process.env.NEXT_PUBLIC_RYBBIT_SCRIPT_URL}
+        data-site-id={process.env.NEXT_PUBLIC_RYBBIT_SITE_ID}
+          strategy="afterInteractive"
+        />
       </body>
     </html>
   );
