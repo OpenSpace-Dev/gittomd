@@ -208,8 +208,12 @@ async function fetchIssues(
 ): Promise<GitHubIssue[]> {
   if (option === "off") return [];
 
-  // Always fetch 100 to ensure we have enough actual issues after filtering out PRs
-  const perPage = 100; // TODO: Implement slicing logic
+  // Calculate optimal fetch size based on the requested limit
+  // Fetch 2.5x the desired limit to account for PRs (which are filtered out)
+  // but cap at 100 for "all" option
+  const limit = option === "top3" ? 3 : option === "top5" ? 5 : option === "top10" ? 10 : 100;
+  const perPage = option === "all" ? 100 : Math.min(Math.ceil(limit * 2.5), 100);
+  
   const url = `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/issues?state=all&sort=comments&direction=desc&per_page=${perPage}`;
 
   try {
@@ -226,7 +230,6 @@ async function fetchIssues(
     ) as GitHubIssue[];
 
     if (option === "all") return issues;
-    const limit = option === "top3" ? 3 : option === "top5" ? 5 : 10; // TODO: rethink
     return issues.slice(0, limit);
   } catch (e) {
     console.error("Error fetching issues:", e);
