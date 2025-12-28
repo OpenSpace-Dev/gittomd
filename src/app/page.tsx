@@ -8,7 +8,6 @@ export default function Home() {
       <Header />
       <main className="grow w-full flex flex-col items-center md:justify-center py-8 gap-8 md:gap-16 text-center px-4">
         <section className="min-h-[81dvh] w-full grow flex flex-col items-center justify-center">
-          
           <h1 className="text-3xl md:text-4xl lg:text-5xl mb-8 font-bold leading-tight text-foreground">
             Convert any GitHub Repository <br className="hidden md:block" />
             to a Single Markdown File
@@ -18,31 +17,6 @@ export default function Home() {
             documentation, or for offline analysis.
           </h2>
           <Inputbox />
-          <a
-            href="https://www.npmjs.com/package/gittomd"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-foreground underline-offset-2 font-medium mt-8"
-          >
-            <div className=" p-2 border border-foreground/20 rounded-lg backdrop-blur-md transition-opacity opacity-80 hover:opacity-100 max-w-sm">
-              <p className="text-sm text-foreground flex gap-2 items-center ">
-                
-                <svg
-                  viewBox="0 0 2500 2500"
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="24"
-                  height="24"
-                >
-                  <path
-                    d="M1241.5 268.5h-973v1962.9h972.9V763.5h495v1467.9h495V268.5z"
-                    fill="#fff"
-                    className="fill-foreground transition-colors"
-                  />
-                </svg>
-                Try also gittomd-cli
-              </p>
-            </div>
-          </a>
         </section>
         <section className="w-full max-w-4xl">
           <h1 className="text-3xl md:text-4xl font-semibold mb-6 text-foreground">
