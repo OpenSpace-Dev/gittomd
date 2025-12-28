@@ -29,6 +29,11 @@ const rawContentHeaders: HeadersInit = {
   Accept: "text/plain",
 };
 
+// Multiplier for fetching extra issues to account for PRs being filtered out
+const ISSUE_FETCH_MULTIPLIER = 2.5;
+// GitHub API's maximum items per page
+const MAX_GITHUB_API_PER_PAGE = 100;
+
 /**
  * Builds a hierarchical tree structure from a flat list of GitHub API file objects.
  * @param apiFiles - An array of file objects from the GitHub API, each with a path and type.
@@ -208,8 +213,19 @@ async function fetchIssues(
 ): Promise<GitHubIssue[]> {
   if (option === "off") return [];
 
-  // Always fetch 100 to ensure we have enough actual issues after filtering out PRs
-  const perPage = 100; // TODO: Implement slicing logic
+  // Map option to desired limit
+  const limitMap: Record<Exclude<IssueOption, "off">, number> = {
+    top3: 3,
+    top5: 5,
+    top10: 10,
+    all: MAX_GITHUB_API_PER_PAGE,
+  };
+  const limit = limitMap[option];
+
+  // Calculate optimal fetch size: multiply by ISSUE_FETCH_MULTIPLIER to account for PRs
+  // (which are filtered out), but cap at MAX_GITHUB_API_PER_PAGE
+  const perPage = option === "all" ? MAX_GITHUB_API_PER_PAGE : Math.min(Math.ceil(limit * ISSUE_FETCH_MULTIPLIER), MAX_GITHUB_API_PER_PAGE);
+  
   const url = `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/issues?state=all&sort=comments&direction=desc&per_page=${perPage}`;
 
   try {
@@ -226,7 +242,6 @@ async function fetchIssues(
     ) as GitHubIssue[];
 
     if (option === "all") return issues;
-    const limit = option === "top3" ? 3 : option === "top5" ? 5 : 10; // TODO: rethink
     return issues.slice(0, limit);
   } catch (e) {
     console.error("Error fetching issues:", e);
