@@ -5,6 +5,11 @@ import type {
   GitHubApiFile,
   TreeNode,
   FileItem,
+  FetchOptions,
+  GitHubIssue,
+  GitHubPullRequest,
+  IssueOption,
+  PullRequestOption,
 } from "./types";
 import { processFile, createTreeStructure } from "./files";
 
@@ -32,7 +37,7 @@ const rawContentHeaders: HeadersInit = {
  */
 function buildTreeFromFlatList(
   apiFiles: { path: string; type: "blob" | "tree" }[],
-  repoName: string
+  repoName: string,
 ): TreeNode {
   const root: TreeNode = {
     name: repoName,
@@ -41,7 +46,7 @@ function buildTreeFromFlatList(
     children: [],
   };
   const sortedApiFiles = [...apiFiles].sort((a, b) =>
-    a.path.localeCompare(b.path)
+    a.path.localeCompare(b.path),
   );
 
   for (const item of sortedApiFiles) {
@@ -71,7 +76,7 @@ function buildTreeFromFlatList(
         const isLastPart = i === parts.length - 1;
         if (!isLastPart && childNode.type === "blob") {
           console.warn(
-            `Path conflict: Node "${childNode.path}" was a blob but is part of a longer path. Correcting to 'tree'.`
+            `Path conflict: Node "${childNode.path}" was a blob but is part of a longer path. Correcting to 'tree'.`,
           );
           childNode.type = "tree";
           if (!childNode.children) childNode.children = [];
@@ -93,7 +98,7 @@ function buildTreeFromFlatList(
  */
 export async function getRepoFilesTree(
   owner: string,
-  repo: string
+  repo: string,
 ): Promise<RepositoryFilesTree | ActionError> {
   let defaultBranch: string;
   try {
@@ -105,7 +110,7 @@ export async function getRepoFilesTree(
         next: {
           revalidate: 21600,
         },
-      }
+      },
     );
     if (!repoDetailsResponse.ok) {
       const errorData = await repoDetailsResponse.json().catch(() => ({}));
@@ -138,7 +143,7 @@ export async function getRepoFilesTree(
         next: {
           revalidate: 21600,
         },
-      }
+      },
     );
     if (!treeResponse.ok) {
       const errorData = await treeResponse.json().catch(() => ({}));
@@ -148,7 +153,7 @@ export async function getRepoFilesTree(
         (treeResponse.status === 409 && message?.includes("empty"))
       ) {
         console.warn(
-          `Repository ${owner}/${repo} (branch: ${defaultBranch}) appears to be empty or has no commit history. Proceeding with an empty file tree.`
+          `Repository ${owner}/${repo} (branch: ${defaultBranch}) appears to be empty or has no commit history. Proceeding with an empty file tree.`,
         );
         return {
           owner,
@@ -173,7 +178,7 @@ export async function getRepoFilesTree(
     const apiFiles: GitHubApiFile[] = treeData.tree
       .filter(
         (item: any) =>
-          (item.type === "blob" || item.type === "tree") && item.path
+          (item.type === "blob" || item.type === "tree") && item.path,
       )
       .map((item: any) => ({
         path: item.path,
@@ -196,6 +201,108 @@ export async function getRepoFilesTree(
   }
 }
 
+async function fetchIssues(
+  owner: string,
+  repo: string,
+  option: IssueOption,
+): Promise<GitHubIssue[]> {
+  if (option === "off") return [];
+
+  // Always fetch 100 to ensure we have enough actual issues after filtering out PRs
+  const perPage = 100; // TODO: Implement slicing logic
+  const url = `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/issues?state=all&sort=comments&direction=desc&per_page=${perPage}`;
+
+  try {
+    const response = await fetch(url, {
+      headers: commonHeaders,
+      next: { revalidate: 3600 },
+    });
+    if (!response.ok) return [];
+    const data = await response.json();
+
+    // Filter out pull requests (GitHub API returns PRs in issues endpoint)
+    const issues = data.filter(
+      (item: any) => !item.pull_request,
+    ) as GitHubIssue[];
+
+    if (option === "all") return issues;
+    const limit = option === "top3" ? 3 : option === "top5" ? 5 : 10; // TODO: rethink
+    return issues.slice(0, limit);
+  } catch (e) {
+    console.error("Error fetching issues:", e);
+    return [];
+  }
+}
+
+async function fetchPullRequests(
+  owner: string,
+  repo: string,
+  option: PullRequestOption,
+): Promise<GitHubPullRequest[]> {
+  if (option === "off") return [];
+
+  // Sort by popularity (comment count)
+  const url = `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/pulls?state=all&sort=popularity&direction=desc&per_page=20`;
+
+  try {
+    const response = await fetch(url, {
+      headers: commonHeaders,
+      next: { revalidate: 3600 },
+    });
+    if (!response.ok) return [];
+    const data = (await response.json()) as GitHubPullRequest[];
+
+    const limit = option === "top3" ? 3 : 5;
+    return data.slice(0, limit);
+  } catch (e) {
+    console.error("Error fetching PRs:", e);
+    return [];
+  }
+}
+
+function generateIssuesMarkdown(issues: GitHubIssue[]): string {
+  if (issues.length === 0) return "";
+
+  const parts = ["## Issues"];
+
+  for (const issue of issues) {
+    const stateIcon = issue.state === "open" ? "🟢" : "🔴";
+    const labels = issue.labels.map((l) => l.name).join(", ");
+
+    parts.push(
+      `### #${issue.number} - ${issue.title} (${stateIcon} ${issue.state}, 💬 ${issue.comments})`,
+    );
+    if (labels) parts.push(`**Labels:** ${labels}`);
+    parts.push(`> ${issue.html_url}`);
+    parts.push("");
+    parts.push(issue.body || "*No description provided.*");
+    parts.push("---");
+  }
+
+  return parts.join("\n\n");
+}
+
+function generatePullRequestsMarkdown(prs: GitHubPullRequest[]): string {
+  if (prs.length === 0) return "";
+
+  const parts = ["## Pull Requests"];
+
+  for (const pr of prs) {
+    const stateIcon = pr.state === "open" ? "🟢" : pr.merged_at ? "🟣" : "🔴";
+    const stateLabel = pr.merged_at ? "merged" : pr.state;
+
+    parts.push(
+      `### #${pr.number} - ${pr.title} (${stateIcon} ${stateLabel}, 💬 ${pr.comments})`,
+    );
+    parts.push(`> ${pr.html_url}`);
+    parts.push("");
+    parts.push(pr.body || "*No description provided.*");
+    parts.push("---");
+  }
+
+  return parts.join("\n\n");
+}
+
 /**
  * Generates a Markdown representation of the file structure of a GitHub repository.
  * @param repofiles - The RepositoryFilesTree object containing the file structure of a GitHub repository.
@@ -204,7 +311,8 @@ export async function getRepoFilesTree(
  * or an ActionError if an error occurs during the generation process.
  */
 export async function generateMarkdownForFiles(
-  repoFiles: RepositoryFilesTree
+  repoFiles: RepositoryFilesTree,
+  options?: FetchOptions,
 ): Promise<MarkdownSuccess | ActionError> {
   const markdownParts: string[] = [];
 
@@ -217,6 +325,27 @@ export async function generateMarkdownForFiles(
   } catch (e: any) {
     const errorMessage = e instanceof Error ? e.message : String(e);
     return { error: `Error generating tree structure: ${errorMessage}` };
+  }
+
+  if (options) {
+    if (options.issues !== "off") {
+      const issues = await fetchIssues(
+        repoFiles.owner,
+        repoFiles.repo,
+        options.issues,
+      );
+      const issuesMd = generateIssuesMarkdown(issues);
+      if (issuesMd) markdownParts.push(issuesMd);
+    }
+    if (options.pullRequests !== "off") {
+      const prs = await fetchPullRequests(
+        repoFiles.owner,
+        repoFiles.repo,
+        options.pullRequests,
+      );
+      const prsMd = generatePullRequestsMarkdown(prs);
+      if (prsMd) markdownParts.push(prsMd);
+    }
   }
 
   const filesToFetchContentFor: { path: string; name: string }[] = [];
@@ -254,7 +383,7 @@ export async function generateMarkdownForFiles(
         const rawFileUrlPath = `${repoFiles.owner}/${repoFiles.repo}/${repoFiles.defaultBranch}/${fileData.path}`;
         const rawFileUrl = new URL(
           rawFileUrlPath,
-          GITHUB_RAW_CONTENT_BASE_URL
+          GITHUB_RAW_CONTENT_BASE_URL,
         ).toString();
 
         const contentResponse = await fetch(rawFileUrl, {
@@ -267,7 +396,7 @@ export async function generateMarkdownForFiles(
 
         if (!contentResponse.ok) {
           console.warn(
-            `Failed to fetch raw content for ${fileData.path} from ${rawFileUrl}: ${contentResponse.status} ${contentResponse.statusText}. Processing with empty content.`
+            `Failed to fetch raw content for ${fileData.path} from ${rawFileUrl}: ${contentResponse.status} ${contentResponse.statusText}. Processing with empty content.`,
           );
         } else {
           contentValue = await contentResponse.text();
@@ -283,17 +412,17 @@ export async function generateMarkdownForFiles(
       } catch (e: any) {
         const errorMessage = e instanceof Error ? e.message : String(e);
         console.error(
-          `Error fetching or processing raw content for ${fileData.path}: ${errorMessage}`
+          `Error fetching or processing raw content for ${fileData.path}: ${errorMessage}`,
         );
         return "";
       }
-    }
+    },
   );
 
   try {
     const processedFileMarkdowns = await Promise.all(fileProcessingPromises);
     markdownParts.push(
-      ...processedFileMarkdowns.filter((md) => md && md.length > 0)
+      ...processedFileMarkdowns.filter((md) => md && md.length > 0),
     );
   } catch (e: any) {
     const errorMessage = e instanceof Error ? e.message : String(e);

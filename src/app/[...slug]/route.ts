@@ -1,6 +1,11 @@
 import { generateMarkdownForFiles, getRepoFilesTree } from "@/lib/github";
 import { after, NextRequest, NextResponse } from "next/server";
-import type { ActionError } from "@/lib/types";
+import type {
+  ActionError,
+  FetchOptions,
+  IssueOption,
+  PullRequestOption,
+} from "@/lib/types";
 import { interpretGitHubErrorForHttpStatus } from "@/lib/utils";
 import { cacheData, getFromCache } from "@/lib/redis";
 
@@ -39,12 +44,34 @@ export async function GET(request: NextRequest) {
         error:
           "GitHub owner and repository name must be provided as the first two path segments after the base API path.",
       },
-      400
+      400,
     );
   }
 
+  const searchParams = request.nextUrl.searchParams;
+  const issuesParam = searchParams.get("issues") as IssueOption | null;
+  const prsParam = searchParams.get("prs") as PullRequestOption | null;
+
+  const validIssueOptions: IssueOption[] = [
+    "off",
+    "top3",
+    "top5",
+    "top10",
+    "all",
+  ];
+  const validPrOptions: PullRequestOption[] = ["off", "top3", "top5"];
+
+  const options: FetchOptions = {
+    issues: validIssueOptions.includes(issuesParam as any)
+      ? issuesParam!
+      : "off",
+    pullRequests: validPrOptions.includes(prsParam as any) ? prsParam! : "off",
+  };
+
+  const optionsKey = `issues=${options.issues}:prs=${options.pullRequests}`;
+
   // Try get from cache first
-  const cachedData = await getFromCache(owner, repo);
+  const cachedData = await getFromCache(owner, repo, optionsKey);
   if (cachedData) {
     return new NextResponse(cachedData, {
       headers: {
@@ -67,7 +94,7 @@ export async function GET(request: NextRequest) {
     return responseJson({ error: actionError.error }, status);
   }
 
-  const markdownResult = await generateMarkdownForFiles(treeResult);
+  const markdownResult = await generateMarkdownForFiles(treeResult, options);
 
   if ("error" in markdownResult) {
     const actionError = markdownResult as ActionError;
@@ -77,9 +104,11 @@ export async function GET(request: NextRequest) {
 
   after(() => {
     // Cache the markdown result
-    cacheData(owner, repo, markdownResult.markdown).catch((error) => {
-      console.error("Error caching data:", error);
-    });
+    cacheData(owner, repo, markdownResult.markdown, optionsKey).catch(
+      (error) => {
+        console.error("Error caching data:", error);
+      },
+    );
   });
 
   return new NextResponse(markdownResult.markdown, {
