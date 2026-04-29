@@ -53,20 +53,28 @@ export default function Inputbox() {
   return (
     <div className="flex flex-col items-center gap-3 w-full">
       <div className="w-full flex justify-center">
-        <input
-          value={link}
-          onChange={(e) => setLink(e.target.value)}
-          onKeyDown={handleKeyDown}
-          type="url"
-          disabled={loading}
-          placeholder="Enter GitHub repository URL"
-          className={twMerge(
-            "border-2 backdrop-blur-xl bg-transparent drop-shadow-[0_0_12px]/50 text-center rounded-lg md:rounded-xl px-2 py-1 md:px-4 md:py-2 w-[90%] md:w-[34rem] transition-all duration-200 focus:outline-none disabled:opacity-50 disabled:cursor-wait",
-            error
-              ? "border-red-500 drop-shadow-red-500 text-red-500"
-              : "border-primary drop-shadow-[color:var(--primary)] text-primary",
+        <div className="relative w-[90%] md:w-[34rem]">
+          <input
+            value={link}
+            onChange={(e) => setLink(e.target.value)}
+            onKeyDown={handleKeyDown}
+            type="url"
+            disabled={loading}
+            placeholder="Enter GitHub repository URL (e.g. https://github.com/expressjs/express)"
+            className={twMerge(
+              "border-2 backdrop-blur-xl bg-transparent drop-shadow-[0_0_12px]/50 text-center rounded-lg md:rounded-xl px-2 py-1 md:px-4 md:py-2 w-full transition-all duration-200 focus:outline-none disabled:opacity-50 disabled:cursor-wait",
+              error
+                ? "border-red-500 drop-shadow-red-500 text-red-500"
+                : "border-primary drop-shadow-[color:var(--primary)] text-primary",
+            )}
+          />
+          {loading && (
+            <span
+              aria-hidden="true"
+              className="absolute right-3 top-1/2 -translate-y-1/2 inline-block h-4 w-4 rounded-full border-2 border-current border-t-transparent animate-spin text-foreground/70"
+            />
           )}
-        />
+        </div>
       </div>
 
       <div className="flex flex-wrap items-center justify-center gap-2 text-sm text-foreground/70">

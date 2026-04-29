@@ -29,18 +29,23 @@ export function interpretGitHubErrorForHttpStatus(errorMessage: string): number 
         errorMessage.includes("Could not determine default branch") ||
         errorMessage.includes("empty repository") ||
         errorMessage.includes("no commit history")) {
-        return 404; 
+        return 404;
     }
     if (errorMessage.startsWith("Repository is too large")) {
-        return 413; 
+        return 413;
     }
-    if (errorMessage.includes("Status: 401") || errorMessage.includes("Status: 403")) {
-        return 502;
+    if (errorMessage.includes("Status: 401")) {
+        return 401;
     }
-    if (errorMessage.includes("Status:")) { // Other specific GitHub client/server errors
-        const statusMatch = errorMessage.match(/Status: (\d+)/);
-        if (statusMatch && parseInt(statusMatch[1], 10) >= 500) return 502;
-        if (statusMatch && parseInt(statusMatch[1], 10) >= 400) return 502;
+    if (errorMessage.includes("Status: 403")) {
+        // GitHub returns 403 for both auth-forbidden and rate-limit exhaustion.
+        return /rate limit|API rate/i.test(errorMessage) ? 429 : 403;
     }
-    return 500; 
+    const statusMatch = errorMessage.match(/Status: (\d+)/);
+    if (statusMatch) {
+        const status = parseInt(statusMatch[1], 10);
+        if (status >= 500) return 502;
+        if (status >= 400) return status;
+    }
+    return 500;
 }

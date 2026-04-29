@@ -11,7 +11,35 @@ import type {
   IssueOption,
   PullRequestOption,
 } from "./types";
-import { processFile, createTreeStructure } from "./files";
+import { processFile, createTreeStructure, pruneTreeForLLM } from "./files";
+
+// Files that should appear at the very top of the markdown body, in priority order.
+// Lower numbers = higher priority. Anything not in this list gets DEFAULT_PRIORITY
+// and is sorted alphabetically by path.
+const DEFAULT_PRIORITY = 100;
+function manifestPriority(path: string): number {
+  // Only apply to root-level files.
+  if (path.includes("/")) return DEFAULT_PRIORITY;
+  const lower = path.toLowerCase();
+  if (lower === "readme" || lower.startsWith("readme.")) return 0;
+  switch (lower) {
+    case "package.json":
+    case "cargo.toml":
+    case "go.mod":
+    case "pyproject.toml":
+    case "requirements.txt":
+    case "gemfile":
+    case "composer.json":
+    case "pom.xml":
+    case "build.gradle":
+    case "build.gradle.kts":
+    case "pubspec.yaml":
+    case "mix.exs":
+      return 1;
+    default:
+      return DEFAULT_PRIORITY;
+  }
+}
 
 const GITHUB_API_BASE_URL = "https://api.github.com";
 const GITHUB_RAW_CONTENT_BASE_URL = "https://raw.githubusercontent.com";
@@ -23,7 +51,6 @@ const commonHeaders: HeadersInit = {
   Accept: "application/vnd.github.v3+json",
   "X-GitHub-Api-Version": "2022-11-28",
   Authorization: `Basic ${encodedCredentials}`,
-  "X-GitHub-Client-ID": process.env.GITHUB_CLIENT_ID || "",
 };
 const rawContentHeaders: HeadersInit = {
   Accept: "text/plain",
@@ -33,6 +60,27 @@ const rawContentHeaders: HeadersInit = {
 const ISSUE_FETCH_MULTIPLIER = 2.5;
 // GitHub API's maximum items per page
 const MAX_GITHUB_API_PER_PAGE = 100;
+// Maximum concurrent raw.githubusercontent.com fetches when assembling file content
+const RAW_FETCH_CONCURRENCY = 16;
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workerCount = Math.max(1, Math.min(limit, items.length));
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const idx = next++;
+      if (idx >= items.length) return;
+      results[idx] = await fn(items[idx], idx);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 /**
  * Builds a hierarchical tree structure from a flat list of GitHub API file objects.
@@ -256,8 +304,14 @@ async function fetchPullRequests(
 ): Promise<GitHubPullRequest[]> {
   if (option === "off") return [];
 
+  const limitMap: Record<Exclude<PullRequestOption, "off">, number> = {
+    top3: 3,
+    top5: 5,
+  };
+  const limit = limitMap[option];
+
   // Sort by popularity (comment count)
-  const url = `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/pulls?state=all&sort=popularity&direction=desc&per_page=20`;
+  const url = `${GITHUB_API_BASE_URL}/repos/${owner}/${repo}/pulls?state=all&sort=popularity&direction=desc&per_page=${limit}`;
 
   try {
     const response = await fetch(url, {
@@ -267,7 +321,6 @@ async function fetchPullRequests(
     if (!response.ok) return [];
     const data = (await response.json()) as GitHubPullRequest[];
 
-    const limit = option === "top3" ? 3 : 5;
     return data.slice(0, limit);
   } catch (e) {
     console.error("Error fetching PRs:", e);
@@ -333,8 +386,17 @@ export async function generateMarkdownForFiles(
 
   markdownParts.push(`# ${repoFiles.owner} - ${repoFiles.repo}`);
 
+  // Prune the tree once: removes trash directories (node_modules, dist, etc.),
+  // non-text leaves (binaries, images), and anything matching trash patterns.
+  // The pruned tree is used both for the rendered tree section and for deciding
+  // which blobs to fetch — so the displayed structure matches the actual content.
+  const prunedTree = pruneTreeForLLM(repoFiles.tree) ?? {
+    ...repoFiles.tree,
+    children: [],
+  };
+
   try {
-    const treeStructureMarkdown = createTreeStructure(repoFiles.tree);
+    const treeStructureMarkdown = createTreeStructure(prunedTree);
     markdownParts.push("## Structure");
     markdownParts.push(treeStructureMarkdown);
   } catch (e: any) {
@@ -369,73 +431,69 @@ export async function generateMarkdownForFiles(
     if (node.type === "blob") {
       filesToFetchContentFor.push({ path: node.path, name: node.name });
     } else if (node.type === "tree" && node.children) {
-      const sortedChildren = [...node.children].sort((a, b) => {
-        if (a.type === "tree" && b.type === "blob") return -1;
-        if (a.type === "blob" && b.type === "tree") return 1;
-        return a.name.localeCompare(b.name);
-      });
-      for (const child of sortedChildren) {
+      for (const child of node.children) {
         collectAllBlobFilesRecursively(child);
       }
     }
   }
 
-  if (repoFiles.tree) {
-    collectAllBlobFilesRecursively(repoFiles.tree);
-  }
+  collectAllBlobFilesRecursively(prunedTree);
 
-  // Sort files so that README.md is processed first, then others
+  // README first, then common manifest files, then everything else alphabetically.
   filesToFetchContentFor.sort((a, b) => {
-    if (a.path === "README.md") return -1;
-    if (b.path === "README.md") return 1;
+    const pa = manifestPriority(a.path);
+    const pb = manifestPriority(b.path);
+    if (pa !== pb) return pa - pb;
     return a.path.localeCompare(b.path);
   });
 
-  const fileProcessingPromises = filesToFetchContentFor.map(
-    async (fileData) => {
-      let contentValue = "";
-      try {
-        const rawFileUrlPath = `${repoFiles.owner}/${repoFiles.repo}/${repoFiles.defaultBranch}/${fileData.path}`;
-        const rawFileUrl = new URL(
-          rawFileUrlPath,
-          GITHUB_RAW_CONTENT_BASE_URL,
-        ).toString();
+  const fetchAndProcessFile = async (fileData: { path: string; name: string }) => {
+    let contentValue = "";
+    try {
+      const rawFileUrlPath = `${repoFiles.owner}/${repoFiles.repo}/${repoFiles.defaultBranch}/${fileData.path}`;
+      const rawFileUrl = new URL(
+        rawFileUrlPath,
+        GITHUB_RAW_CONTENT_BASE_URL,
+      ).toString();
 
-        const contentResponse = await fetch(rawFileUrl, {
-          headers: rawContentHeaders,
-          cache: "force-cache",
-          next: {
-            revalidate: 21600,
-          },
-        });
+      const contentResponse = await fetch(rawFileUrl, {
+        headers: rawContentHeaders,
+        cache: "force-cache",
+        next: {
+          revalidate: 21600,
+        },
+      });
 
-        if (!contentResponse.ok) {
-          console.warn(
-            `Failed to fetch raw content for ${fileData.path} from ${rawFileUrl}: ${contentResponse.status} ${contentResponse.statusText}. Processing with empty content.`,
-          );
-        } else {
-          contentValue = await contentResponse.text();
-        }
-
-        const fileItem: FileItem = {
-          name: fileData.name,
-          path: fileData.path,
-          content: contentValue,
-        };
-
-        return processFile(fileItem);
-      } catch (e: any) {
-        const errorMessage = e instanceof Error ? e.message : String(e);
-        console.error(
-          `Error fetching or processing raw content for ${fileData.path}: ${errorMessage}`,
+      if (!contentResponse.ok) {
+        console.warn(
+          `Failed to fetch raw content for ${fileData.path} from ${rawFileUrl}: ${contentResponse.status} ${contentResponse.statusText}. Processing with empty content.`,
         );
-        return "";
+      } else {
+        contentValue = await contentResponse.text();
       }
-    },
-  );
+
+      const fileItem: FileItem = {
+        name: fileData.name,
+        path: fileData.path,
+        content: contentValue,
+      };
+
+      return processFile(fileItem);
+    } catch (e: any) {
+      const errorMessage = e instanceof Error ? e.message : String(e);
+      console.error(
+        `Error fetching or processing raw content for ${fileData.path}: ${errorMessage}`,
+      );
+      return "";
+    }
+  };
 
   try {
-    const processedFileMarkdowns = await Promise.all(fileProcessingPromises);
+    const processedFileMarkdowns = await mapWithConcurrency(
+      filesToFetchContentFor,
+      RAW_FETCH_CONCURRENCY,
+      fetchAndProcessFile,
+    );
     markdownParts.push(
       ...processedFileMarkdowns.filter((md) => md && md.length > 0),
     );

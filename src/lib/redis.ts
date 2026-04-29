@@ -13,6 +13,8 @@ const client = Redis.fromEnv();
 const brotliCompressAsync = promisify(brotliCompress);
 const brotliDecompressAsync = promisify(brotliDecompress);
 
+const CACHE_TTL_SECONDS = 60 * 60 * 24; // 24 hours
+
 /** Retrieves data from the Redis cache for a given user and repository.
  * @param user - The GitHub username.
  * @param repo - The GitHub repository name.
@@ -57,7 +59,7 @@ export const cacheData = async (
     const compressedData = await brotliCompressAsync(data);
     // Convert to base64 for storage
     const dataEncoded = Buffer.from(compressedData).toString("base64");
-    await client.set(key, dataEncoded, { ex: 3600 }); // Set expiration to 1 hour
+    await client.set(key, dataEncoded, { ex: CACHE_TTL_SECONDS });
     console.log(`Data cached for ${user}/${repo}`);
   } catch (error) {
     console.error("Error compressing data for caching:", error);

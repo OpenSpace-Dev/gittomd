@@ -9,6 +9,33 @@ import type {
 import { interpretGitHubErrorForHttpStatus } from "@/lib/utils";
 import { cacheData, getFromCache } from "@/lib/redis";
 
+// GitHub usernames: 1–39 chars, alphanumeric or hyphen, may not start with hyphen.
+// Repo names: 1–100 chars, alphanumerics plus . _ -, may not start with . or -.
+// We use a permissive shape that covers both and rejects path traversal / control chars.
+const GITHUB_NAME_RE = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,99}$/;
+
+const baseMarkdownHeaders = {
+  "Content-Type": "text/markdown; charset=utf-8",
+  "Cache-Control":
+    "public, s-maxage=600, max-age=300, stale-while-revalidate=1800, stale-if-error=3600",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "X-XSS-Protection": "1; mode=block",
+  "X-Robots-Tag": "noindex, nofollow",
+} as const;
+
+const buildMarkdownHeaders = (
+  download: boolean,
+  owner: string,
+  repo: string,
+): Record<string, string> => {
+  const headers: Record<string, string> = { ...baseMarkdownHeaders };
+  if (download) {
+    headers["Content-Disposition"] = `attachment; filename="${owner}-${repo}.md"`;
+  }
+  return headers;
+};
+
 const responseJson = (data: unknown, status: number) => {
   return NextResponse.json(data, {
     status,
@@ -48,9 +75,17 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  if (!GITHUB_NAME_RE.test(owner) || !GITHUB_NAME_RE.test(repo)) {
+    return responseJson(
+      { error: "Invalid GitHub owner or repository name." },
+      400,
+    );
+  }
+
   const searchParams = request.nextUrl.searchParams;
   const issuesParam = searchParams.get("issues") as IssueOption | null;
   const prsParam = searchParams.get("prs") as PullRequestOption | null;
+  const download = searchParams.get("download") === "1";
 
   const validIssueOptions: IssueOption[] = [
     "off",
@@ -62,28 +97,21 @@ export async function GET(request: NextRequest) {
   const validPrOptions: PullRequestOption[] = ["off", "top3", "top5"];
 
   const options: FetchOptions = {
-    issues: validIssueOptions.includes(issuesParam as any)
-      ? issuesParam!
+    issues: validIssueOptions.includes(issuesParam as IssueOption)
+      ? (issuesParam as IssueOption)
       : "off",
-    pullRequests: validPrOptions.includes(prsParam as any) ? prsParam! : "off",
+    pullRequests: validPrOptions.includes(prsParam as PullRequestOption)
+      ? (prsParam as PullRequestOption)
+      : "off",
   };
 
   const optionsKey = `issues=${options.issues}:prs=${options.pullRequests}`;
+  const markdownHeaders = buildMarkdownHeaders(download, owner, repo);
 
   // Try get from cache first
   const cachedData = await getFromCache(owner, repo, optionsKey);
   if (cachedData) {
-    return new NextResponse(cachedData, {
-      headers: {
-        "Content-Type": "text/markdown; charset=utf-8",
-        "Cache-Control":
-          "public, s-maxage=600, max-age=300, stale-while-revalidate=1800, stale-if-error=3600",
-        "X-Content-Type-Options": "nosniff",
-        "X-Frame-Options": "DENY",
-        "X-XSS-Protection": "1; mode=block",
-        "X-Robots-Tag": "noindex, nofollow",
-      },
-    });
+    return new NextResponse(cachedData, { headers: markdownHeaders });
   }
 
   const treeResult = await getRepoFilesTree(owner, repo);
@@ -111,15 +139,5 @@ export async function GET(request: NextRequest) {
     );
   });
 
-  return new NextResponse(markdownResult.markdown, {
-    headers: {
-      "Content-Type": "text/markdown; charset=utf-8",
-      "Cache-Control":
-        "public, s-maxage=600, max-age=300, stale-while-revalidate=1800, stale-if-error=3600",
-      "X-Content-Type-Options": "nosniff",
-      "X-Frame-Options": "DENY",
-      "X-XSS-Protection": "1; mode=block",
-      "X-Robots-Tag": "noindex, nofollow",
-    },
-  });
+  return new NextResponse(markdownResult.markdown, { headers: markdownHeaders });
 }
